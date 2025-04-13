@@ -1,0 +1,241 @@
+import sympy as sp
+from sympy import satisfiable
+from sympy.logic import to_cnf
+
+import subprocess
+import tools.minihit
+
+from functools import reduce
+
+def count_clauses(formula)-> int:
+    """
+    Returns the number of clauses of the formula.
+    """
+    if isinstance(formula, sp.And):
+        return len(formula.args)
+    elif isinstance(formula, sp.Or):
+        return 1
+    else:
+        return 1
+
+
+def map_symbols_to_integers(symbols):
+    """
+    Maps each symbol to a unique integer starting from 1.
+    """
+
+    symbol_map = {symbol: i + 1 for i, symbol in enumerate(symbols)}
+    return symbol_map
+
+
+def clf_ins(clf, instance)-> tuple:
+    """
+    Returns the complementary form of `clf` if `instance` implies `clf`,
+    otherwise returns `clf` and `instance`.
+
+    Parameters:
+    ----------
+    clf : sympy expression
+        The classifier or formula to be checked.
+        
+    instance : sympy expression
+        The instance or condition to be checked against `clf`.
+
+    Returns:
+    -------
+    tuple
+        A tuple containing the prediction of the classifier, the modified `clf` and `instance` based on the implication check.
+    """
+
+    if(not satisfiable(sp.And(sp.Not(clf), instance))):
+        return 1, to_cnf(sp.Not(clf)), instance
+    return 0, clf, instance
+
+
+import sympy as sp
+
+def to_dimacs(clf, instance, symbol_map, top=2)-> list[str]:
+    """
+    Converts logical formulas clf and instance into DIMACS format clauses using
+    a symbol mapping symbol_map.
+
+    Parameters:
+    ----------
+    clf : sympy expression
+        The classifier or main logical formula to be converted.
+
+    instance : sympy expression
+        The instance or additional logical condition to be converted.
+
+    symbol_map : dict
+        A dictionary mapping sympy symbols or literals to integer identifiers used
+        in the DIMACS format.
+
+    top : int, optional
+        Integer identifier to indicate the type of clause (e.g., hard or soft).
+        Defaults to 2 for hard clauses.
+
+    Returns:
+    -------
+    list
+        A list of strings representing the clauses in DIMACS format.
+    """
+    
+    # Hard clauses
+    clauses = []
+    if isinstance(clf, sp.And):
+        for clause in clf.args:
+            if isinstance(clause, sp.Or):
+                clauses.append(str(top) + ' ' + ' '.join([str(symbol_map[lit]) if not lit.is_Not else f"-{symbol_map[lit.args[0]]}" for lit in clause.args]))
+            else:
+                clauses.append(str(top) + ' ' + str(symbol_map[clause]) if not clause.is_Not else f"{top} -{symbol_map[clause.args[0]]}")
+
+    elif isinstance(clf, sp.Or):
+        clauses.append(str(top) + ' ' + ' '.join([str(symbol_map[lit]) if not lit.is_Not else f"-{symbol_map[lit.args[0]]}" for lit in clf.args]))
+        
+    else:
+        clauses.append(str(top) + ' ' + str(symbol_map[clf.args[0]]) if not clf.is_Not else f"{top} -{symbol_map[clf.args[0]]}")
+
+    # Soft clauses
+    if isinstance(instance, sp.And):
+        for clause in instance.args:
+            if isinstance(clause, sp.Or):
+                clauses.append('1 ' + ' '.join([str(symbol_map[lit]) if not lit.is_Not else f"-{symbol_map[lit.args[0]]}" for lit in clause.args]))
+            else:
+                clauses.append('1 ' + str(symbol_map[clause]) if not clause.is_Not else f"1 -{symbol_map[clause.args[0]]}")
+
+    elif isinstance(instance, sp.Or):
+        clauses.append('1 ' + ' '.join([str(symbol_map[lit]) if not lit.is_Not else f"-{symbol_map[lit.args[0]]}" for lit in clf.args]))
+        
+    else:
+        clauses.append('1 ' + str(symbol_map[instance.args[0]]) if not instance.is_Not else f"1 -{symbol_map[instance.args[0]]}")
+    
+    return clauses
+
+def formula_to_file(fileName: str, formula: list[str], vars: int, claus: int, top= 2)-> None:
+    """
+    Write the formula 'formula' in a file titled 'fileName' in a DIMACS format.
+
+    Parameters:
+    ----------
+    fileName (str): The title of the file produced.
+    formula (list[list[int]]): The formula to be converted.
+    vars (int): The number of the variables in the formula 'formula'.
+    claus (int): The number of the clauses in the formula 'formula'.
+    top (int): It is an integer such that if the weight of a clause is equal to it, the clause is considered as hard. 
+    """
+
+    with open(fileName, 'w') as f:
+        f.write(f'p wcnf {vars} {claus} {top}\n')
+        for clause in formula:
+            f.write(f'{clause} 0\n')
+        f.close()
+
+
+def run(command: str):
+    """
+    Execute a terminal command and return the output. 
+    """
+
+    result = subprocess.run(command, shell= True, stdout= subprocess.PIPE, stderr= subprocess.PIPE, text= True)
+    if result.returncode == 0:
+        return result.stdout
+    else:
+        raise Exception(f"Command failed with error: {result.stderr}")
+
+
+def mcs_s(fileName: str)-> list[set[int]]:
+    """
+    Returns a set of minimal correction subsets generated by enumELSRMRCache.
+
+    Parameters:
+    ----------
+    fileName (str): The title of the file produced by enumELSRMRCache containing minimal correction subsets.
+    """
+
+    mincos = []
+    with open (fileName, 'r') as f:
+        line = f.readline()
+        while(line != ''):
+            if (line[0] == 'v'):
+                mincos.append(set((line[2:]).split(' ')[:-1]))
+            line = f.readline()
+        f.close()
+
+    return mincos
+
+
+def mhs_s(mcs: list[set[int]])-> list[set[int]]:
+    """
+    Returns a set of minimal hitting sets of MCS (Minimal Correction Subsets).
+
+    Parameters:
+    ----------
+    mcs (list[set[int]]): List of sets representing the Minimal Correction Subsets (MCS).
+
+    Returns:
+    -------
+    set[set[int]]: A set of sets representing the Minimal Hitting Sets (MHS).
+    """
+
+    mhs = tools.minihit.HsDag(mcs)
+    mhs.solve(prune= True, sort= False)
+    return list(mhs.generate_minimal_hitting_sets())    
+
+
+def xPred(clf, instance, symbol_map)-> tuple[int, list[set[int]], list[set[int]]]:
+    """
+    Compute the prediction, the sufficient reasons, and the counterfactual explanations for the decision taken by the classifier 'clf' on the
+    given 'instance'.
+    
+    Parameters:
+    ----------
+    clf: sp.Expr
+        The classifier formula.
+    instance: sp.Expr
+        The instance formula.
+    symbol_map: dict[str, int]
+        Maps each symbol to a unique integer starting from 1.
+
+    
+    Returns:
+    -------
+    tuple[int, list[set[int]], list[set[int]]]
+        A tuple containing the prediction, a list of sufficient reasons (minimal hitting sets), and a list of counterfactual explanations (minimal correction subsets).
+    """
+
+    # Determine prediction and possibly modify clf and instance for unsatisfiable formulas.
+    pred, clf, instance = clf_ins(clf, instance)
+    
+    # Write the formula in DIMACS format.
+    formula = to_dimacs(clf, instance, symbol_map)
+    formula_to_file('xPred.wcnf', formula, len(symbol_map), len(formula))
+
+    # Compress the formula file and run the external tool.
+    run('gzip xPred.wcnf')
+    run('./tool/enumELSRMRCache -verb=1 xPred.wcnf.gz > xPred.txt')
+
+    # Compute the minimal correction subsets (MCS) and minimal hitting sets (MHS).
+    mincos = mcs_s('xPred.txt')
+    minhs = mhs_s(mincos)
+
+    # Clean up temporary files.
+    run('rm xPred.wcnf.gz xPred.txt')
+
+    # Helper function to map MCS/MHS elements to their corresponding values in the formula.
+    def aux(x: set[str], formula=formula)-> set[int]:
+        result = set()
+        for y in x:
+            index = int(y) - 1
+            if 0 <= index < len(formula):
+                value = formula[index][1:4].strip()  # Remove spaces
+                result.add(int(value))
+        return result
+
+    # Apply the helper function to the lists of MCS and MHS.
+    mincos = list(map(lambda x: aux(x, formula), mincos))
+    minhs = list(map(lambda x: aux(x, formula), minhs))
+
+    return pred, minhs, mincos
+
+
